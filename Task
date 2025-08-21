@@ -1,0 +1,537 @@
+# Mini LinkedIn-like Community (MERN)
+
+A minimal LinkedIn-style app with email/password auth, text-only posts, a public feed, and profile pages.
+
+**Tech Stack**
+
+* **Frontend**: React (Vite) + React Router
+* **Backend**: Node.js (Express) + JWT
+* **Database**: MongoDB Atlas (Mongoose)
+* **Deploy**: Render (backend), Vercel (frontend)
+
+---
+
+## Features Covered
+
+1. **User Authentication**
+
+   * Register/Login (email + password)
+   * Profile with name, email, bio
+2. **Public Post Feed**
+
+   * Create text-only posts
+   * Home feed shows posts with author name + timestamp
+3. **Profile Page**
+
+   * View any user profile and their posts
+
+---
+
+## Project Structure
+
+```
+mini-linkedin/
+├─ server/
+│  ├─ .env               # MONGODB_URI, JWT_SECRET, CORS_ORIGIN
+│  ├─ package.json
+│  ├─ index.js
+│  ├─ models/
+│  │  ├─ User.js
+│  │  └─ Post.js
+│  ├─ middleware/
+│  │  └─ auth.js
+│  └─ routes/
+│     ├─ auth.js
+│     ├─ users.js
+│     └─ posts.js
+└─ client/
+   ├─ index.html
+   ├─ package.json
+   └─ src/
+      ├─ main.jsx
+      ├─ App.jsx
+      ├─ api.js
+      ├─ styles.css
+      ├─ components/
+      │  ├─ NavBar.jsx
+      │  ├─ PostComposer.jsx
+      │  └─ PostItem.jsx
+      └─ pages/
+         ├─ Login.jsx
+         ├─ Register.jsx
+         ├─ Feed.jsx
+         └─ Profile.jsx
+```
+
+---
+
+## Backend (Express + Mongoose)
+
+### server/package.json
+
+```json
+{
+  "name": "mini-linkedin-server",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "dev": "nodemon index.js",
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^8.4.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  }
+}
+```
+
+### server/.env (example)
+
+```
+MONGODB_URI=mongodb+srv://<user>:<pass>@<cluster>/<db>?retryWrites=true&w=majority
+JWT_SECRET=supersecretlongrandomstring
+PORT=8080
+CORS_ORIGIN=http://localhost:5173
+```
+
+### server/index.js
+
+```js
+import express from 'express';
+import cors from 'cors';
+import dotenv from 'dotenv';
+import mongoose from 'mongoose';
+import authRoutes from './routes/auth.js';
+import userRoutes from './routes/users.js';
+import postRoutes from './routes/posts.js';
+
+dotenv.config();
+
+const app = express();
+app.use(express.json());
+app.use(
+  cors({
+    origin: process.env.CORS_ORIGIN?.split(',') || '*',
+    credentials: true,
+  })
+);
+
+app.get('/', (req, res) => res.send({ ok: true }));
+
+app.use('/api/auth', authRoutes);
+app.use('/api/users', userRoutes);
+app.use('/api/posts', postRoutes);
+
+const start = async () => {
+  try {
+    await mongoose.connect(process.env.MONGODB_URI);
+    const port = process.env.PORT || 8080;
+    app.listen(port, () => console.log(`API running on :${port}`));
+  } catch (e) {
+    console.error(e);
+    process.exit(1);
+  }
+};
+start();
+```
+
+### server/models/User.js
+
+```js
+import mongoose from 'mongoose';
+
+const UserSchema = new mongoose.Schema(
+  {
+    name: { type: String, required: true },
+    email: { type: String, required: true, unique: true, index: true },
+    passwordHash: { type: String, required: true },
+    bio: { type: String, default: '' }
+  },
+  { timestamps: true }
+);
+
+export default mongoose.model('User', UserSchema);
+```
+
+### server/models/Post.js
+
+```js
+import mongoose from 'mongoose';
+
+const PostSchema = new mongoose.Schema(
+  {
+    author: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    content: { type: String, required: true, maxlength: 1000 }
+  },
+  { timestamps: true }
+);
+
+export default mongoose.model('Post', PostSchema);
+```
+
+### server/middleware/auth.js
+
+```js
+import jwt from 'jsonwebtoken';
+
+export function requireAuth(req, res, next) {
+  const authHeader = req.headers.authorization || '';
+  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+  if (!token) return res.status(401).json({ error: 'Missing token' });
+  try {
+    const payload = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = payload; // { id, email }
+    next();
+  } catch (e) {
+    return res.status(401).json({ error: 'Invalid token' });
+  }
+}
+```
+
+### server/routes/auth.js
+
+```js
+import { Router } from 'express';
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
+import User from '../models/User.js';
+
+const router = Router();
+
+router.post('/register', async (req, res) => {
+  try {
+    const { name, email, password } = req.body;
+    if (!name || !email || !password)
+      return res.status(400).json({ error: 'Missing fields' });
+
+    const exists = await User.findOne({ email });
+    if (exists) return res.status(409).json({ error: 'Email already in use' });
+
+    const passwordHash = await bcrypt.hash(password, 10);
+    const user = await User.create({ name, email, passwordHash });
+
+    const token = jwt.sign({ id: user._id, email: user.email }, process.env.JWT_SECRET, {
+      expiresIn: '7d',
+    });
+    res.status(201).json({
+      token,
+      user: { id: user._id, name: user.name, email: user.email, bio: user.bio },
+    });
+  } catch (e) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+router.post('/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    const user = await User.findOne({ email });
+    if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+
+    const ok = await bcrypt.compare(password, user.passwordHash);
+    if (!ok) return res.status(401).json({ error: 'Invalid credentials' });
+
+    const token = jwt.sign({ id: user._id, email: user.email }, process.env.JWT_SECRET, {
+      expiresIn: '7d',
+    });
+    res.json({ token, user: { id: user._id, name: user.name, email: user.email, bio: user.bio } });
+  } catch (e) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+export default router;
+```
+
+### server/routes/users.js
+
+```js
+import { Router } from 'express';
+import User from '../models/User.js';
+import Post from '../models/Post.js';
+import { requireAuth } from '../middleware/auth.js';
+
+const router = Router();
+
+// Get current user profile
+router.get('/me', requireAuth, async (req, res) => {
+  const user = await User.findById(req.user.id).lean();
+  if (!user) return res.status(404).json({ error: 'Not found' });
+  res.json({ id: user._id, name: user.name, email: user.email, bio: user.bio });
+});
+
+// Update current user profile
+router.put('/me', requireAuth, async (req, res) => {
+  const { name, bio } = req.body;
+  const updated = await User.findByIdAndUpdate(
+    req.user.id,
+    { $set: { ...(name && { name }), ...(bio !== undefined && { bio }) } },
+    { new: true }
+  ).lean();
+  res.json({ id: updated._id, name: updated.name, email: updated.email, bio: updated.bio });
+});
+
+// View a user's profile + their posts
+router.get('/:id', async (req, res) => {
+  const { id } = req.params;
+  const user = await User.findById(id).lean();
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  const posts = await Post.find({ author: id }).sort({ createdAt: -1 }).lean();
+  res.json({
+    user: { id: user._id, name: user.name, email: user.email, bio: user.bio },
+    posts: posts.map(p => ({ id: p._id, content: p.content, createdAt: p.createdAt }))
+  });
+});
+
+export default router;
+```
+
+### server/routes/posts.js
+
+```js
+import { Router } from 'express';
+import Post from '../models/Post.js';
+import User from '../models/User.js';
+import { requireAuth } from '../middleware/auth.js';
+
+const router = Router();
+
+// Create post
+router.post('/', requireAuth, async (req, res) => {
+  const { content } = req.body;
+  if (!content || !content.trim()) return res.status(400).json({ error: 'Content required' });
+  const post = await Post.create({ author: req.user.id, content: content.trim() });
+  res.status(201).json({ id: post._id, content: post.content, createdAt: post.createdAt });
+});
+
+// Public feed
+router.get('/', async (req, res) => {
+  const posts = await Post.find().sort({ createdAt: -1 }).limit(100).populate('author', 'name').lean();
+  res.json(
+    posts.map(p => ({
+      id: p._id,
+      content: p.content,
+      createdAt: p.createdAt,
+      author: { id: p.author._id, name: p.author.name }
+    }))
+  );
+});
+
+export default router;
+```
+
+---
+
+## Frontend (React + Vite)
+
+### client/package.json
+
+```json
+{
+  "name": "mini-linkedin-client",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-router-dom": "^6.26.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.1",
+    "vite": "^5.4.0"
+  }
+}
+```
+
+### client/index.html
+
+```html
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Mini LinkedIn</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
+```
+
+### client/src/styles.css
+
+```css
+:root { font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, sans-serif; }
+body { margin: 0; background: #f7f7f8; color: #111; }
+.container { max-width: 800px; margin: 0 auto; padding: 1rem; }
+.card { background: white; border-radius: 12px; padding: 1rem; box-shadow: 0 2px 8px rgba(0,0,0,0.06); margin-bottom: 1rem; }
+.input { width: 100%; padding: 0.6rem 0.8rem; border: 1px solid #ddd; border-radius: 8px; }
+.btn { padding: 0.6rem 0.9rem; border: none; border-radius: 8px; background: #2563eb; color: white; cursor: pointer; }
+.btn.secondary { background: #e5e7eb; color: #111; }
+.row { display: flex; gap: 0.5rem; align-items: center; }
+.small { color: #555; font-size: 0.9rem; }
+.nav { background: white; border-bottom: 1px solid #eee; padding: 0.75rem; }
+.nav a { margin-right: 1rem; text-decoration: none; color: #2563eb; }
+textarea.input { min-height: 80px; resize: vertical; }
+```
+
+### client/src/api.js
+
+```js
+const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8080';
+
+export function getToken() {
+  return localStorage.getItem('token');
+}
+
+export function setAuth(token) {
+  localStorage.setItem('token', token);
+}
+
+export function authHeaders() {
+  const t = getToken();
+  return t ? { Authorization: `Bearer ${t}` } : {};
+}
+
+export async function api(path, { method = 'GET', body, auth = false } = {}) {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(auth ? authHeaders() : {})
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || 'Request failed');
+  }
+  return res.json();
+}
+```
+
+### client/src/main.jsx
+
+```jsx
+import React from 'react';
+import { createRoot } from 'react-dom/client';
+import { BrowserRouter } from 'react-router-dom';
+import App from './App.jsx';
+import './styles.css';
+
+createRoot(document.getElementById('root')).render(
+  <BrowserRouter>
+    <App />
+  </BrowserRouter>
+);
+```
+
+### client/src/App.jsx
+
+```jsx
+import React, { useEffect, useState } from 'react';
+import { Routes, Route, Navigate, useNavigate } from 'react-router-dom';
+import NavBar from './components/NavBar.jsx';
+import Feed from './pages/Feed.jsx';
+import Profile from './pages/Profile.jsx';
+import Login from './pages/Login.jsx';
+import Register from './pages/Register.jsx';
+import { api, getToken } from './api.js';
+
+export default function App() {
+  const [me, setMe] = useState(null);
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    const t = getToken();
+    if (!t) return;
+    api('/api/users/me', { auth: true }).then(setMe).catch(() => setMe(null));
+  }, []);
+
+  function onLogout() {
+    localStorage.removeItem('token');
+    setMe(null);
+    navigate('/login');
+  }
+
+  return (
+    <>
+      <NavBar me={me} onLogout={onLogout} />
+      <Routes>
+        <Route path="/" element={<Feed me={me} />} />
+        <Route path="/login" element={me ? <Navigate to="/" /> : <Login onAuth={setMe} />} />
+        <Route path="/register" element={me ? <Navigate to="/" /> : <Register onAuth={setMe} />} />
+        <Route path="/users/:id" element={<Profile me={me} />} />
+      </Routes>
+    </>
+  );
+}
+```
+
+### client/src/components/NavBar.jsx
+
+```jsx
+import React from 'react';
+import { Link } from 'react-router-dom';
+
+export default function NavBar({ me, onLogout }) {
+  return (
+    <div className="nav">
+      <div className="container row" style={{ justifyContent: 'space-between' }}>
+        <div>
+          <Link to="/">Mini LinkedIn</Link>
+        </div>
+        <div className="row">
+          {me ? (
+            <>
+              <span className="small">Signed in as <strong>{me.name}</strong></span>
+              <button className="btn secondary" onClick={onLogout}>Logout</button>
+            </>
+          ) : (
+            <>
+              <Link to="/login">Login</Link>
+              <Link to="/register">Register</Link>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+```
+
+### client/src/components/PostComposer.jsx
+
+```jsx
+import React, { useState } from 'react';
+import { api } from '../api.js';
+
+export default function PostComposer({ onPosted }) {
+  const [content, setContent] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  async function submit(e) {
+    e.preventDefault();
+    if (!content.trim()) return;
+    setLoading(true);
+    setError('');
+    try {
+      await api('/api/posts', { method: 'POST', body
+```
